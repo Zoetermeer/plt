@@ -10,9 +10,9 @@
          racket/place/private/th-place
          racket/place/private/prop
          racket/private/streams
-         racket/place/private/trace-threads
-         (only-in racket/runtime-path define-runtime-path)
-
+         (only-in future-visualizer/private/profiling 
+                  create-tracing-place 
+                  parallel-profiling?)
          (for-syntax racket/base
                      racket/syntax
                      syntax/parse))
@@ -37,8 +37,7 @@
          place-dead-evt
          place-location?
          prop:place-location
-         visualize
-         tracing?)
+         parallel-profiling?)
 
 (define-syntax (define-pl-func stx)
   (syntax-case stx ()
@@ -59,7 +58,7 @@
 (define place-channel (if (pl-place-enabled?)  pl-place-channel th-place-channel))
 
 (define-pl-func place-sleep p)
-;(define-pl-func place-wait p)
+(define-pl-func place-wait p)
 (define-pl-func place-kill p)
 (define-pl-func place-break p kind)
 (define-pl-func place-channel-put p msg)
@@ -68,14 +67,6 @@
 (define-pl-func place? p)
 (define-pl-func place-message-allowed? p)
 (define-pl-func place-dead-evt p)
-
-(define (place-wait p) 
-  (cond 
-    [(tracing?)
-     (set! msgs (append (place-channel-get (hash-ref log-chans p))
-                        msgs))
-     (pl-place-wait p)]
-    [else (pl-place-wait p)]))
 
 (define-values (prop:place-location place-location? place-location-ref)
   (make-struct-type-property 'place-location
@@ -125,28 +116,6 @@
   (close-output-port i)
   p)
 
-;Visualizer stuff
-(define-runtime-path tracing-place "place/private/tracing-place.rkt")
-(define tracing? (make-parameter #f))
-(define log-chans (make-hash))
-(define msgs '())
-
-(define-syntax (trace stx)
-  (syntax-parse 
-   stx
-   [(_ body ...)
-    #`(parameterize ([tracing? #t])
-        body ...
-        msgs)]))
-
-(define-syntax (visualize stx)
-  (syntax-parse 
-   stx
-   [(_ body ...) 
-    #`(parameterize ([tracing? #t])
-        body ...
-        msgs)]))
-
 (define (start-place* who module-path function in out err)
   ;; Duplicate checks in that are in the primitive `pl-dynamic-place',
   ;; unfortunately, but we want these checks before we start making
@@ -171,47 +140,33 @@
     (raise-arguments-error who "output port is closed" "port" out))
   (when (and (output-port? err) (port-closed? err))
     (raise-arguments-error who "error port is closed" "port" err))
-    (cond
-      [(pl-place-enabled?)
-       (define-values (p pin pout perr)
-         (cond 
-           [(tracing?)
-            (define-values (theirs ours) (place-channel))
-            (define-values (p pin pout perr) 
-              (pl-dynamic-place tracing-place
-                                'place-main
-                                (if-stream-in who in)
-                                (if-stream-out who out)
-                                (if-stream-out who err)))
-            (place-channel-put p theirs)
-            (place-channel-put p module-path)
-            (place-channel-put p function)
-            (hash-set! log-chans p ours)
-            (values p pin pout perr)]
-           [else
-            (pl-dynamic-place module-path
-                              function
-                              (if-stream-in  who in)
-                              (if-stream-out who out)
-                              (if-stream-out who err))]))
-       (pump-place p pin pout perr in out err)
-       (values p
-               (and (not in) pin)
-               (and (not out) pout)
-               (and (not err) perr))]
-
+  (cond
+    [(pl-place-enabled?)
+     (define create (if (parallel-profiling?) create-tracing-place pl-dynamic-place))
+     (define-values (p pin pout perr)
+       (create module-path 
+               function
+               (if-stream-in who in)
+               (if-stream-out who out)
+               (if-stream-out who err)))
+     (pump-place p pin pout perr in out err)
+     (values p
+             (and (not in) pin)
+             (and (not out) pout)
+             (and (not err) perr))]
+    
     [else
-      (define-values (inr  inw ) (if in  (values #f #f) (make-pipe)))
-      (define-values (outr outw) (if out (values #f #f) (make-pipe)))
-      (define-values (errr errw) (if err (values #f #f) (make-pipe)))
-
-      (parameterize ([current-input-port  (or in  inr)]
-                     [current-output-port (or out outw)]
-                     [current-error-port  (or err errw)])
-        (values (th-dynamic-place module-path function)
-                (and (not in ) inw )
-                (and (not out) outr)
-                (and (not err) errr)))]))
+     (define-values (inr  inw ) (if in  (values #f #f) (make-pipe)))
+     (define-values (outr outw) (if out (values #f #f) (make-pipe)))
+     (define-values (errr errw) (if err (values #f #f) (make-pipe)))
+     
+     (parameterize ([current-input-port  (or in  inr)]
+                    [current-output-port (or out outw)]
+                    [current-error-port  (or err errw)])
+       (values (th-dynamic-place module-path function)
+               (and (not in ) inw )
+               (and (not out) outr)
+               (and (not err) errr)))]))
 
 
 (define-for-syntax (modpath->string modpath)

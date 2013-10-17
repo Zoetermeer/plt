@@ -252,6 +252,7 @@
   (let ([info (sync/timeout 0 recv)]) 
     (if info 
         (let ([v (vector-ref info 2)]) 
+          (printf "~a\n" v)
           (cond 
             [(future-event? v) 
              (case (future-event-what v) 
