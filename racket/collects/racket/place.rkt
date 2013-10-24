@@ -9,10 +9,8 @@
          racket/vector
          racket/place/private/th-place
          racket/place/private/prop
+         racket/place/private/profiling
          racket/private/streams
-         (only-in future-visualizer/private/profiling 
-                  create-tracing-place 
-                  parallel-profiling?)
          (for-syntax racket/base
                      racket/syntax
                      syntax/parse))
@@ -37,7 +35,7 @@
          place-dead-evt
          place-location?
          prop:place-location
-         parallel-profiling?)
+         parallel-profiling?) 
 
 (define-syntax (define-pl-func stx)
   (syntax-case stx ()

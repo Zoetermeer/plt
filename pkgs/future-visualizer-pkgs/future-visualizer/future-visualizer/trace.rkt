@@ -1,7 +1,10 @@
 #lang racket/base
 (require racket/contract
-         "private/profiling.rkt"
-         "private/visualizer-data.rkt")
+         (only-in racket/place parallel-profiling?)
+         racket/place/private/profiling
+         "private/visualizer-data.rkt"
+         (only-in '#%futures 
+                  reset-future-logs-for-tracing!))
 (provide (struct-out future-event)
          (struct-out gc-info)
          (struct-out indexed-future-event)
@@ -28,11 +31,11 @@
     (timeline-events)))
 
 (define-syntax-rule (parallel-profile e ...)
-  (begin (start-future-tracing!)
+  (begin (reset-future-logs-for-tracing!)
          (parameterize ([parallel-profiling? #t])
            (begin 
-             (define-values (pthd chan) (spawn-polling-thread (make-channel))) 
+             (define parent-chan (make-channel))
+             (parent-is parent-chan)
              (begin e ...)
              (stop-future-tracing!)
-             (log "getting traces...\n")
-             (request-trace pthd chan)))))
+             (request-trace parent-chan)))))
