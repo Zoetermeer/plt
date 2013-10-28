@@ -3,12 +3,12 @@
 (require scheme/future 
          scheme/list 
          rackunit
-         (only-in future-visualizer/trace trace-futures) 
+         (only-in future-visualizer/trace parallel-profile) 
          (only-in future-visualizer/private/visualizer-data runtime-block-event?))
 
 ;;Test whether a futures program hits any barricades
 (define-syntax-rule (blocks? e ...) 
-  (let ([log (trace-futures e ...)])
+  (let ([log (flatten (parallel-profile e ...))])
     (> (length (filter runtime-block-event? log)) 0)))
 
 ;;Stress test for odd?/even?

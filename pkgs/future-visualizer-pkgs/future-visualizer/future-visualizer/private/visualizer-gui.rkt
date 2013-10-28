@@ -103,8 +103,10 @@
   (values (min screen-w DEF-WINDOW-WIDTH) 
           (min screen-h DEF-WINDOW-HEIGHT)))
 
-(define (show-visualizer #:timeline [timeline #f]) 
-  (define the-tl (if timeline timeline (timeline-events)))
+;;show-visualizer : (listof (or gc-info future-event)) -> void
+(define (show-visualizer logs) 
+  (define topo (place-topology logs))
+  (define the-tl (sort/index logs))
   (when (empty? the-tl) 
     (error 'show-visualizer "No future log messages found."))
   (define the-trace (build-trace the-tl))  

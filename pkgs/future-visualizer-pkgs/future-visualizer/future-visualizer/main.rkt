@@ -1,5 +1,6 @@
 #lang racket/base 
-(require racket/contract 
+(require (for-syntax racket/base) 
+         racket/contract 
          pict
          racket/bool 
          future-visualizer/trace
@@ -8,7 +9,7 @@
 
 (provide visualize-futures 
          (contract-out 
-          [show-visualizer (->* () (#:timeline (listof indexed-future-event?)) void?)]
+          #;[show-visualizer (->* () (#:timeline (listof indexed-future-event?)) void?)]
           [visualize-futures-thunk ((-> any/c) . -> . any/c)]
           [timeline-pict (->i ([indexed-fevents (listof indexed-future-event?)]) 
                               (#:x [x (or/c #f exact-nonnegative-integer?)] 
@@ -35,15 +36,20 @@
                                              (and x y width height)) 
                                     [p pict?])]))
 
-(define-syntax-rule (visualize-futures e ...)
+#;(define-syntax-rule (visualize-futures e ...)
   (begin (start-future-tracing!)
          (begin0 (begin e ...)
            (stop-future-tracing!)
            (show-visualizer))))
 
+(define-syntax (visualize-futures stx)
+  (syntax-case stx ()
+    [(_ e ...)
+      #'(visualize-futures-thunk 
+          (lambda () 
+            e ...))]))
+
+
 ;;visualize-futures-thunk : (-> any/c) -> any/c
 (define (visualize-futures-thunk thunk) 
-  (start-future-tracing!)
-  (begin0 (thunk)
-    (stop-future-tracing!)
-    (show-visualizer)))
+  (show-visualizer (parallel-profile (thunk))))

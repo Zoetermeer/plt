@@ -1,6 +1,7 @@
 #lang racket/base
 (require (only-in racket/list flatten) 
          (only-in racket/future futures-enabled?)
+         racket/match
          racket/set 
          (only-in racket/vector vector-drop)
          "constants.rkt"
@@ -10,9 +11,7 @@
                   reset-future-logs-for-tracing! 
                   mark-future-trace-end!)) 
 
-(provide start-future-tracing! 
-         stop-future-tracing!
-         (struct-out future-event)
+(provide (struct-out future-event)
          (struct-out gc-info)
          (struct-out indexed-future-event)
          (struct-out trace) 
@@ -20,7 +19,9 @@
          (struct-out future-timeline)
          (struct-out event)
          (struct-out rtcall-info)
-         timeline-events
+         (struct-out place-node)
+         place-topology
+         sort/index
          organize-output 
          build-trace 
          missing-data?
@@ -42,19 +43,25 @@
          event-or-gc-time
          proc-id-or-gc<?)
 
-(define-struct future-event (future-id process-id what time prim-name user-data) 
-  #:prefab)
+(define-struct future-event 
+  (future-id 
+   process-id 
+   what 
+   time 
+   prim-name 
+   user-data) #:prefab)
 
-(define-struct gc-info (major? 
-                        pre-used 
-                        pre-admin 
-                        code-page-total 
-                        post-used 
-                        post-admin 
-                        start-time 
-                        end-time 
-                        start-real-time 
-                        end-real-time) #:prefab)
+(define-struct gc-info 
+  (major? 
+   pre-used 
+   pre-admin 
+   code-page-total 
+   post-used 
+   post-admin 
+   start-time 
+   end-time 
+   start-real-time 
+   end-real-time) #:prefab)
 
 ;Contains an index and a future-event, 
 ;so we can preserve the order in which future-events 
@@ -65,63 +72,71 @@
 (struct indexed-future-event (index fevent) #:transparent)
 
 ;The whole trace, with a start/end time and list of process timelines
-(struct trace (start-time ;Absolute start time (in process milliseconds)
-               end-time ;Absolute end time
-               proc-timelines ;(listof process-timeline)
-               future-timelines ;Hash of (future id --o--> (listof event)) 
-               gc-timeline ;process-timeline where proc-id == 'gc, and each event is a GC
-               all-events ;(listof event)
-               real-time ;Total amount of time for the trace (in ms)
-               num-futures ;Number of futures created
-               num-blocks ;Number of barricades hit
-               num-syncs ;Number of 'atomic' ops done 
-               num-gcs ;Number of GC's that occurred during the trace
-               blocked-futures ;Number of futures which encountered a barricade at some point
-               avg-syncs-per-future 
-               block-counts ;prim name --o--> number of blocks 
-               sync-counts ;op name --o--> number of syncs 
-               future-rtcalls ;fid --o--> rtcall-info
-               creation-tree))
+(struct trace 
+  (start-time ;Absolute start time (in process milliseconds)
+   end-time ;Absolute end time
+   proc-timelines ;(listof process-timeline)
+   future-timelines ;Hash of (future id --o--> (listof event)) 
+   gc-timeline ;process-timeline where proc-id == 'gc, and each event is a GC
+   all-events ;(listof event)
+   real-time ;Total amount of time for the trace (in ms)
+   num-futures ;Number of futures created
+   num-blocks ;Number of barricades hit
+   num-syncs ;Number of 'atomic' ops done 
+   num-gcs ;Number of GC's that occurred during the trace
+   blocked-futures ;Number of futures which encountered a barricade at some point
+   avg-syncs-per-future 
+   block-counts ;prim name --o--> number of blocks 
+   sync-counts ;op name --o--> number of syncs 
+   future-rtcalls ;fid --o--> rtcall-info
+   creation-tree))
 
-(struct rtcall-info (fid 
-                     block-hash ; prim name --o--> number of blocks
-                     sync-hash) ; op name --o--> number of syncs 
+(struct rtcall-info 
+  (fid 
+   block-hash ; prim name --o--> number of blocks
+   sync-hash) ; op name --o--> number of syncs 
   #:transparent)
 
-;(struct process-timeline timeline (proc-index))
-(struct process-timeline (proc-id 
-                          proc-index
-                          start-time 
-                          end-time 
-                          events))
+(struct process-timeline 
+  (proc-id 
+   proc-index
+   start-time 
+   end-time 
+   events))
 
-;(struct future-timeline timeline ())
-(struct future-timeline (future-id 
-                         start-time 
-                         end-time 
-                         events))
+(struct future-timeline 
+  (future-id 
+   start-time 
+   end-time 
+   events))
 
 ;A block of time (e.g. a process executing a portion of a future thunk).
-(struct event (index
-               start-time 
-               end-time 
-               proc-id 
-               proc-index ;The id of the process in which this event occurred
-               future-id 
-               [user-data #:mutable]
-               type 
-               [prim-name #:mutable]
-               timeline-position ;The event's position among all events occurring in its process (sorted by time)
-               [prev-proc-event #:mutable] 
-               [next-proc-event #:mutable]
-               [prev-future-event #:mutable]
-               [next-future-event #:mutable]
-               [next-targ-future-event #:mutable] 
-               [prev-targ-future-event #:mutable]
-               ;If the event is a block on a future thread, pointer to the corresponding 
-               ;event indicating block handled on runtime thread
-               [block-handled-event #:mutable] 
-               [segment #:mutable]) #:transparent)
+(struct event 
+  (index
+   start-time 
+   end-time 
+   proc-id 
+   proc-index ;The id of the process in which this event occurred
+   future-id 
+   [user-data #:mutable]
+   type 
+   [prim-name #:mutable]
+   timeline-position ;The event's position among all events occurring in its process (sorted by time)
+   [prev-proc-event #:mutable] 
+   [next-proc-event #:mutable]
+   [prev-future-event #:mutable]
+   [next-future-event #:mutable]
+   [next-targ-future-event #:mutable] 
+   [prev-targ-future-event #:mutable]
+   ;If the event is a block on a future thread, pointer to the corresponding 
+   ;event indicating block handled on runtime thread
+   [block-handled-event #:mutable] 
+   [segment #:mutable]) #:transparent)
+
+;We map the structure of the logs given to us into 
+;a tree of place-nodes, which gives us a place-creation tree.
+(struct place-node 
+  (id msgs children) #:transparent)
 
 ;;event-has-duration? : event -> bool
 (define (event-has-duration? evt) 
@@ -219,20 +234,7 @@
 
 ;;get-relative-start-time : trace float -> float
 (define (relative-time trace abs-time) 
-  (- abs-time (trace-start-time trace)))
-
-;Log message receiver 
-(define recv #f) 
-
-;;start-future-tracing! -> void
-(define (start-future-tracing!)
-  (reset-future-logs-for-tracing!)
-  (when (not recv) 
-    (set! recv (make-log-receiver (current-logger) 'debug))))
-
-;;stop-future-tracing! -> void
-(define (stop-future-tracing!) 
-  (mark-future-trace-end!))
+  (- abs-time (trace-start-time trace))) 
 
 ;;event-or-gc-time : (or future-event gc-info indexed-future-event) -> float
 (define (event-or-gc-time evt) 
@@ -247,34 +249,12 @@
       (future-event-process-id evt) 
       'gc))
 
-;;timeline-events/private : -> void
-(define (timeline-events/private) 
-  (let ([info (sync/timeout 0 recv)]) 
-    (if info 
-        (let ([v (vector-ref info 2)]) 
-          (cond 
-            [(future-event? v) 
-             (case (future-event-what v) 
-               [(stop-trace) '()] 
-               [else (cons v (timeline-events/private))])] 
-            [(gc-info? v) (cons v (timeline-events/private))] 
-            [else (timeline-events/private)])) 
-        (timeline-events/private))))
-          
-;Gets log events for an execution timeline
-;;timeline-events : (listof indexed-future-event)
-(define (timeline-events)
-  (cond 
-    [(not (futures-enabled?)) '()]
-    [else 
-     (define sorted (sort (timeline-events/private)
-                          #:key event-or-gc-time 
-                          <)) 
-     (for/list ([evt (in-list sorted)] 
-                [i (in-naturals)]) 
-       (indexed-future-event i evt))]))
-
-
+;;sort/index : (listof (or future-event gc-info)) -> (listof indexed-future-event)
+(define (sort/index logs)
+  (define sorted (sort logs #:key event-or-gc-time <))
+  (for/list ([evt (in-list sorted)]
+             [i (in-naturals)])
+    (indexed-future-event i evt)))
 
 ;;proc-id-or-gc<? : (or number symbol) (or number symbol) -> bool
 (define (proc-id-or-gc<? a b) 
@@ -282,6 +262,23 @@
     [(equal? b 'gc) #f]
     [(equal? a 'gc) #t]  
     [else (< a b)]))
+
+;;place-topology : ((listof future-event) . (listof pair)) -> place-node
+(define (place-topology ls 
+                        #:parent-id [parent-id #f] 
+                        #:child-index [child-index 1])
+  (match ls
+    [`(,logs . ,child-logs) 
+      (define node-id (if parent-id 
+                        (format "~a.~a" parent-id child-index)
+                        (number->string child-index)))
+      (place-node node-id
+                  logs
+                  (filter (λ (l) (not (null? l))) 
+                          (for/list ([cl (in-list child-logs)]
+                                     [i (in-naturals 1)])
+                            (place-topology cl #:parent-id node-id #:child-index i))))]
+    [else null]))
 
 ;Produces a vector of vectors, where each inner vector contains 
 ;all the log output messages for a specific process

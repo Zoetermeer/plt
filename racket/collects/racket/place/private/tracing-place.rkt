@@ -5,8 +5,6 @@
 (provide place-main)
 
 (define (place-main pch)
-  (set-current-place-id! (place-channel-get pch))
-  (log "Tracing place began\n")
 
   (define parent-chan (place-channel-get pch))
   (start-polling-thread #:in-parent-place? #f)
