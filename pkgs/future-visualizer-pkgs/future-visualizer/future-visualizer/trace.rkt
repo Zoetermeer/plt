@@ -34,8 +34,8 @@
   (begin (reset-future-logs-for-tracing!)
          (parameterize ([parallel-profiling? #t])
            (begin 
-             (define parent-chan (make-channel))
-             (parent-is parent-chan)
+             (start-polling-thread)
              (begin e ...)
-             (stop-future-tracing!)
-             (request-trace parent-chan)))))
+             ;(stop-future-tracing!)
+             (request-trace)))))
+

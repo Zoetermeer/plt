@@ -3,11 +3,10 @@
          racket/runtime-path
          (for-syntax racket/base)
          (only-in racket/list partition))
-(provide #;tracing-poll
-         create-tracing-place
+(provide create-tracing-place
          parallel-profiling?
+         start-polling-thread
          request-trace
-         send-trace-upstream
          announce-place-created
          i-am-finished
          parent-is
@@ -29,15 +28,17 @@
 (define (log fmt . args)
   (printf "(Place ~a) ~a\n" current-place-id (apply format `(,fmt ,@args))))
 
-(define polling-thread-chan (make-channel))
-(define polling-for-parent-chan (make-channel))
-(define polling-for-children-chan (make-channel))
-(define log-recv (make-log-receiver (current-logger) 'debug))
-
 (define parallel-profiling? (make-parameter #f))
 (define-runtime-path tracing-place-module "tracing-place.rkt")
 
-(define-struct future-event (future-id process-id what time prim-name user-data) #:prefab)
+(define-struct future-event 
+  (future-id 
+    process-id 
+    what 
+    time 
+    prim-name 
+    user-data) #:prefab)
+
 (define-struct gc-info (major? 
                         pre-used 
                         pre-admin 
@@ -49,49 +50,7 @@
                         start-real-time 
                         end-real-time) #:prefab)
 
-;;create-tracing-place : path symbol port port port -> place-descriptor
-(define (create-tracing-place modpath fn in out err)
-  (define-values (pdesc pin pout perr)
-    (pl-dynamic-place tracing-place-module
-                      'place-main
-                      in
-                      out
-                      err))
-  (define-values (their-trace-chan our-trace-chan) (pl-place-channel))
-  (announce-place-created our-trace-chan)
-  (put pdesc (begin0 
-               next-id 
-               (set! next-id (+ next-id 1))))
-  (put pdesc their-trace-chan)
-  (put pdesc modpath)
-  (put pdesc fn)  
-  (values pdesc pin pout perr))
-
-;;spawn-polling-thread! : place-channel -> void
-;; THREAD: runs on place's main thread
-#;(define (spawn-polling-thread parent-chan)
-  (set! polling-thread (thread (tracing-poll)))
-  (channel-put polling-thread-chan parent-chan))
-
-;;announce-place-created : channel -> void
-(define (announce-place-created child-chan)
-  (channel-put polling-for-children-chan child-chan))
-
-(define (i-am-finished)
-  (channel-put polling-thread-chan SEND-UPSTREAM-MSG)
-  (thread-wait polling-thread))
-
-;;parent-is : place-channel -> void
-(define (parent-is parent)
-  (channel-put polling-for-parent-chan parent))
-
-(define (send-trace-upstream ch)
-  (channel-put ch SEND-UPSTREAM-MSG))
-  
-(define (request-trace chan)
-  (channel-put chan REQUEST-TRACE-MSG)
-  (channel-get chan))
-
+;Is e a visualizer-related log message?
 (define-syntax (log-msg? stx)
   (syntax-case stx ()
     [(_ e) 
@@ -101,30 +60,219 @@
           (or (future-event? v) (gc-info? v))]
          [else #f])]))
 
-(define (main-thread-terminated? evt)
-  (thread? evt))
+;;create-tracing-place : path symbol port port port -> place-descriptor
+(define (create-tracing-place modpath fn in out err)
+  (define-values (pdesc pin pout perr)
+    (pl-dynamic-place tracing-place-module
+                      'place-main
+                      in
+                      out
+                      err))
+  (define-values (our-pchan their-pchan) (pl-place-channel))
+  (announce-place-created our-pchan)
 
-(define (trace-from-child? evt)
-  (list? evt))
+  (pl-place-channel-put pdesc 
+                        (begin0 
+                          next-id 
+                          (set! next-id (+ next-id 1))))
+  (pl-place-channel-put pdesc their-pchan)
+  (pl-place-channel-put pdesc modpath)
+  (pl-place-channel-put pdesc fn)  
+  (values pdesc pin pout perr))
 
-(define (child-place-spawned? evt)
-  (and (pair? evt)
-    (pl-place-channel? (car evt))
-    (pl-place-channel? (cdr evt))))
 
-(define (put ch v)
-  (if (pl-place-channel? ch)
-    (pl-place-channel-put ch v)
-    (channel-put ch v)))
 
-(define polling-thread 
+;Polling thread code
+;There are two kinds of polling threads:
+; Primary: the polling thread running in the parent place
+; Secondary: polling threads running in child places
+;Each channel name uses a prefix to indicate which type 
+;of polling thread requires it.
+(define all:polling-thread #f)
+(define all:log-recv (make-log-receiver (current-logger) 'debug))
+(define all:new-children-chan (make-channel))
+(define primary:request-trace-chan (make-channel))
+(define secondary:finished-chan (make-channel))
+(define secondary:get-parent-chan-chan (make-channel))
+(define secondary:parent-chan #f)
+
+;;announce-place-created : place-channel -> void
+;;Runs on main thread
+(define (announce-place-created child-place-chan)
+  (channel-put all:new-children-chan child-place-chan))
+
+;;Runs on main thread
+;;But only in a child place
+(define (i-am-finished)
+  (pl-place-channel-put 
+    secondary:parent-chan
+    (channel-get secondary:finished-chan)))
+
+;;parent-is : place-channel -> void
+;;Runs on main thread
+;;But only in a child place
+(define (parent-is parent)
+  (channel-put secondary:get-parent-chan-chan parent))
+  
+;;Runs on main thread
+;;But only in the parent place
+(define (request-trace)
+  (channel-get primary:request-trace-chan))
+
+;;Runs on main thread
+;;Called in all places
+(define (start-polling-thread #:in-parent-place? [in-parent-place? #t])
+  (unless (and all:polling-thread (thread-running? all:polling-thread))
+    (set! all:polling-thread 
+      (thread (poll in-parent-place?)))))
+
+;;poll : bool -> (-> void)
+(define (poll primary-polling-thread?)
+  (λ () 
+    (let loop ([children '()]
+               [my-log '()])
+      (sync 
+        (apply 
+          choice-evt 
+          `(,(apply 
+                choice-evt 
+                (map (λ (child)
+                      (if (pl-place-channel? child)
+                        (handle-evt
+                          child
+                          (λ (messages)
+                            (log "child finished")
+                            (loop (for/list ([child′ (in-list children)])
+                                    (if (equal? child child′)
+                                      messages
+                                      child′))
+                                  my-log)))
+                        never-evt))
+                      children))
+              ,(handle-evt all:log-recv
+                  (λ (new-entry)
+                    (loop children
+                          (if (log-msg? new-entry)
+                            (cons (vector-ref new-entry 2) my-log)
+                            my-log))))
+              ,(handle-evt all:new-children-chan
+                  (λ (val) 
+                    (loop (cons val children) my-log)))
+              ,@(if primary-polling-thread?
+                  `(,(handle-evt 
+                        (channel-put-evt primary:request-trace-chan (cons my-log children))
+                        (λ (_) (void))))
+                  `(,(handle-evt secondary:get-parent-chan-chan
+                        (λ (val)
+                          (log "got a parent")
+                          (set! secondary:parent-chan val)
+                          (loop children my-log)))
+                    ,(handle-evt (channel-put-evt secondary:finished-chan (cons my-log children))
+                        (λ (_) (void)))))))))))
+
+
+
+
+
+
+
+
+
+
+(define-syntax (if-not stx)
+  (syntax-case stx ()
+    [(_ e other)
+     #'(begin 
+        (let ([ev e])
+          (if ev ev other)))]))
+
+;The "child" polling thread
+;(the thread running in any non-parent place)
+;(define finished-chan (make-channel))
+;(define get-parent-chan-chan (make-channel))
+;(define parent-chan #f)
+;(define log-recv (make-log-receiver (current-logger) 'debug))
+#;(define child-polling-thread
+  (λ () 
+    ;;children : (listof (or/c place-channel (listof future-event)))
+    ;;my-log : (listof future-event)
+    (let loop ([children '()]
+               [my-log '()])
+      (sync
+        (apply 
+          choice-evt 
+            (map (λ (child)
+                    (if (pl-place-channel? child)
+                      (handle-evt
+                        child
+                        (λ (messages)
+                          (loop (for/list ([child′ (in-list children)])
+                                  (if (equal? child child2)
+                                    messages
+                                    child′))
+                                my-log)))
+                      never-evt))
+                  children)
+            (handle-evt log-recv 
+              (λ (val)
+                (loop children 
+                      (if (log-msg? new-entry)
+                          (cons (vector-ref new-entry 2) my-log)
+                          my-log))))
+            (handle-evt get-parent-chan-chan
+              (λ (val)
+                (set! parent-chan val)
+                (loop children my-log)))
+            (handle-evt finished-chan
+              (λ (val)
+                (pl-place-channel-put parent-chan (cons my-log children)))))))))
+
+;The "parent" thread (polling thread running 
+;in the parent place
+;(define parent-chan (make-channel))
+;(define request-trace-chan (make-channel))
+#;(define parent-polling-thread
+  (λ ()
+    (let loop ([children '()]
+               [my-log '()])
+      (sync 
+        (apply 
+          choice-evt 
+          (map (λ (child)
+                    (if (pl-place-channel? child)
+                      (handle-evt
+                        child
+                        (λ (messages)
+                          (loop (for/list ([child′ (in-list children)])
+                                  (if (equal? child child2)
+                                    messages
+                                    child′))
+                                my-log)))
+                      never-evt))
+                  children)
+          (handle-evt (channel-put-evt request-trace-chan (cons my-log children))
+            (λ (_)
+              (void)))
+          (handle-evt log-recv
+            (λ (new-entry)
+              (loop children 
+                    (if (log-msg? new-entry)
+                        (cons (vector-ref new-entry 2) my-log)
+                        my-log)))))))))
+
+
+
+
+
+
+
+;The old, dual-purpose thread function (defunct)
+#;(define polling-thread 
   (thread 
    (λ ()
      (let loop (;; children : (listof (or/c chan (listof log-message)))
                 [children '()]
-                [my-log '()]
-                [parent-chan #f])
-        (log "loop")
+                [my-log '()])
        (sync
         (apply
          choice-evt
@@ -133,47 +281,41 @@
                     (handle-evt
                      child
                      (λ (messages) 
-                      (log "receive")
                        (loop (for/list ([child2 (in-list children)])
                                (if (equal? child child2)
                                    messages
                                    child2))
-                             my-log
-                             parent-chan)))
+                             my-log)))
                     never-evt))
-              children)) 
-        (handle-evt (if parent-chan parent-chan never-evt) 
+              children))
+        (handle-evt (channel-put-evt request-trace-chan children)
+                    (λ (_)
+                      (log "trace request rcvd")
+                      (void)))        
+        ;; change to work only when parent-chan is the place channel of the parent
+        (handle-evt (if-not the-parent-chan never-evt) 
                     (λ (val) 
-                      (cond
-                        ;TODO: return child logs on trace-request
-                        [(is-trace-request? val) 
-                          (put parent-chan (cons my-log children))]
-                        [(pl-place-channel? val) 
-                         (loop children my-log val)])))
+                      ;TODO: return child logs on trace-request
+                      (put the-parent-chan (cons my-log children))))
         (handle-evt log-recv 
                     (λ (new-entry)
-                      (log "future log msg")
                       (loop children 
                             (if (log-msg? new-entry)
-                                (cons new-entry my-log)
-                                my-log)
-                            parent-chan)))
-        (handle-evt polling-for-parent-chan
-                    (λ (val)
-                      (loop children my-log val)))
+                                (cons (vector-ref new-entry 2) my-log)
+                                my-log))))
         (handle-evt polling-for-children-chan
                     (λ (val) 
-                      (loop (cons val children) my-log parent-chan)))
-        (handle-evt polling-thread-chan
-                    (λ (val) 
-                      (cond 
-                        [(is-send-upstream-req? val) 
-                          (log "Send upstream request")
-                         ;Send my parent channel down to all children
-                         ;Send my children up to my parent
-                         ;Send my logs back to my parent
-                         (define-values (child-chans child-logs) 
-                           (partition pl-place-channel? children)) 
-                         (for-each (λ (c) (put c parent-chan)) children)
-                         ;(put parent-chan child-chans)
-                         (put parent-chan (cons my-log child-logs))]))))))))
+                      (loop (cons val children) my-log)))
+        (handle-evt (channel-put-evt 
+                      wait-for-finish-chan
+                      (let-values ([(_ child-logs) (partition pl-place-channel? children)])
+                        (cons my-log child-logs)))
+                    (λ (_) (void)))
+        #;(handle-evt wait-for-finish-chan
+                    (λ (val)
+                      (log "finished") 
+                      (define-values (child-chans child-logs) 
+                        (partition pl-place-channel? children)) 
+                      ;(for-each (λ (c) (put c parent-chan)) children)
+                      ;(put parent-chan child-chans)
+                      (put the-parent-chan (cons my-log child-logs)))))))))
