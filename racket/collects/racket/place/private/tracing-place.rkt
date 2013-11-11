@@ -5,7 +5,6 @@
 (provide place-main)
 
 (define (place-main pch)
-
   (define parent-chan (place-channel-get pch))
   (start-polling-thread #:in-parent-place? #f)
   (parent-is parent-chan)

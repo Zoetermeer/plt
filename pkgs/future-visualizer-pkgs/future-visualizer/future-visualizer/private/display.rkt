@@ -30,7 +30,8 @@
          in-viewable-region-horiz 
          in-viewable-region-vert?
          scale-viewable-region
-         between)
+         between
+         random-color)
 
 (struct viewable-region (x y width height) #:transparent)
 
@@ -104,6 +105,11 @@
   (case type 
     [(block) "white"] 
     [else "black"]))
+
+(define (random-color)
+  (list (random 256)
+        (random 256)
+        (random 256)))
 
 (define (header-forecolor) "white") 
 (define (header-backcolor) "slategray")

@@ -4,6 +4,7 @@
          racket/draw
          pict
          data/interval-map
+         racket/set
          "visualizer-data.rkt"
          "graph-drawing.rkt"
          "drawing-helpers.rkt"
@@ -13,6 +14,7 @@
 (provide timeline-pict
          timeline-pict-for-trace-data
          timeline-overlay
+         place-topology-map
          seg-in-vregion
          calc-segments
          calc-ticks
@@ -876,3 +878,113 @@
                                  txtp))
              (+ yacc (pict-height txtbg) CREATE-GRAPH-PADDING))))
         pct])]))
+
+(define (future-count pn)
+  (set-count 
+    (apply set 
+           (map future-event-future-id (filter future-event? (place-node-logs pn))))))
+
+(define (gc-count pn)
+  (length (filter gc-info? (place-node-logs pn))))
+
+;;This assumes all picts in 'picts' are the same size
+(define (flow-superimpose bg picts [margin 0.0])
+  (define maxx (- (pict-width bg) margin))
+  (define maxy (- (pict-height bg) margin))
+  (define-values (pct _ __) 
+    (for/fold ([pct bg] 
+               [x margin] 
+               [y margin]) ([p (in-list picts)])
+      (define-values (w h) (values (pict-width p) (pict-height p)))
+      (define-values (x′ y′)
+        (cond 
+          [(> (+ x w) maxx) 
+           (values margin (+ y h margin))]
+          [else 
+           (values x y)]))
+      (values (pin-over pct x′ y′ p)
+              (+ x′ w margin)
+              y′)))
+  pct)
+
+;;place-node->pict : place-node uint uint -> pict
+(define (place-node->pict pn w h)
+  (define pname (colorize (text (format "Place ~a" (place-node-id pn))) "white"))
+  (define pfevents (colorize (text (format "Trace events: ~a" (length (place-node-logs pn)))) "white"))
+  (define fcount (future-count pn))
+  (define pfcount (colorize (text (format "Futures: ~a" fcount)) "white"))
+  (define gccount (gc-count pn))
+  (define pgccount (colorize (text (format "GC's: ~a" gccount)) "white"))
+  (define pdetail
+    (vl-append 
+      5.0
+      (lc-superimpose
+        (cellophane (colorize (filled-rectangle w (+ (pict-height pname) 10)) "white") 0.4)
+        pname)
+      (lt-superimpose
+        (apply hc-append 5.0 (build-list fcount (λ (x) (cellophane (colorize (filled-rectangle 20 20) "white") 0.2))))
+        pfcount)
+      (lt-superimpose
+        (apply hc-append 5.0 (build-list gccount (λ (x) (cellophane (colorize (filled-rectangle 20 20) "white") 0.2))))
+        pgccount)
+      pfevents))
+  (define-values (wd ht)
+    (values (max w (pict-width pdetail))
+            (max h (pict-height pdetail))))
+  (lt-superimpose 
+    (colorize (filled-rectangle wd ht) (random-color))
+    pdetail))
+
+;;max-logs-for-any-branch : place-node -> uint
+(define (max-logs-for-any-branch tree)
+  (define nodelen (length (place-node-logs tree)))
+  (cond 
+    [(null? (place-node-children tree)) nodelen]
+    [else
+      (+ nodelen
+         (apply max (map max-logs-for-any-branch (place-node-children tree))))]))
+
+;;place-topology-map/private : pict place-node uint real -> pict
+(define (place-topology-map/private parent-pict tree level logcount->dots)
+  (define nchildren (length (place-node-children tree)))
+  (define-values (max-for-any-child childrens-log-count)
+    (for/fold ([max 0] [lcount 0]) ([c (in-list (place-node-children tree))])
+      (define l (length (place-node-logs c)))
+      (values (if (> l max) l max) (+ lcount l))))
+  (if (zero? nchildren)
+    parent-pict
+    (vl-append parent-pict 
+               (apply ht-append
+                      (map (λ (n) 
+                              (place-topology-map/private 
+                                (place-node->pict n 
+                                                  (* (pict-width parent-pict) 
+                                                     (/ (length (place-node-logs n))
+                                                        childrens-log-count))
+                                                  (* logcount->dots max-for-any-child))
+                                n 
+                                (+ level 1)
+                                logcount->dots))
+                      (place-node-children tree)))))) 
+
+;;place-topology-map : viewable-region place-node -> pict
+(define (place-topology-map vregion tree)
+  (define bg (blank (viewable-region-width vregion)
+                    (viewable-region-height vregion)))
+  (define pns
+    (let loop ([node tree])
+      (cond 
+        [(null? (place-node-children node)) `(,node)]
+        [else 
+          (cons node 
+                (apply append (map loop (place-node-children node))))])))
+  (flow-superimpose bg (map (λ (pn) (place-node->pict pn 400 400)) pns)))
+
+
+
+
+
+
+
+
+

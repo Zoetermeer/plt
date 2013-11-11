@@ -21,6 +21,7 @@
          (struct-out rtcall-info)
          (struct-out place-node)
          place-topology
+         flatten-topology
          sort/index
          organize-output 
          build-trace 
@@ -136,7 +137,7 @@
 ;We map the structure of the logs given to us into 
 ;a tree of place-nodes, which gives us a place-creation tree.
 (struct place-node 
-  (id msgs children) #:transparent)
+  (id logs children) #:transparent)
 
 ;;event-has-duration? : event -> bool
 (define (event-has-duration? evt) 
@@ -279,6 +280,15 @@
                                      [i (in-naturals 1)])
                             (place-topology cl #:parent-id node-id #:child-index i))))]
     [else null]))
+
+;;flatten-topology : place-node -> (listof place-node)
+(define (flatten-topology t)
+  (cond 
+    [(null? (place-node-children t)) (list t)]
+    [else 
+      (cons t 
+            (flatten (for/list ([c (in-list (place-node-children t))])
+                        (flatten-topology c))))]))
 
 ;Produces a vector of vectors, where each inner vector contains 
 ;all the log output messages for a specific process

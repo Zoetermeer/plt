@@ -86,7 +86,8 @@
 (define (i-am-finished)
   (pl-place-channel-put 
     secondary:parent-chan
-    (channel-get secondary:finished-chan)))
+    (channel-get secondary:finished-chan))
+  (pl-place-channel-get secondary:parent-chan))
 
 ;;parent-is : place-channel -> void
 ;;Runs on main thread
@@ -123,7 +124,9 @@
                           (λ (messages)
                             (loop (for/list ([child′ (in-list children)])
                                     (if (equal? child child′)
-                                      messages
+                                      (begin 
+                                        (pl-place-channel-put child 'received)
+                                        messages)
                                       child′))
                                   my-log)))
                         never-evt))
@@ -139,7 +142,8 @@
                     (loop (cons val children) my-log)))
               ,@(if primary-polling-thread?
                   `(,(handle-evt 
-                        (channel-put-evt primary:request-trace-chan (cons my-log children))
+                        (channel-put-evt primary:request-trace-chan 
+                          (cons my-log children))
                         (λ (_) (void))))
                   `(,(handle-evt secondary:get-parent-chan-chan
                         (λ (val)

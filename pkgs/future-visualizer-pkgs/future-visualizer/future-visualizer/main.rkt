@@ -10,6 +10,7 @@
 (provide visualize-futures 
          (contract-out 
           #;[show-visualizer (->* () (#:timeline (listof indexed-future-event?)) void?)]
+          [show-profiler (list? . -> . void?)]
           [visualize-futures-thunk ((-> any/c) . -> . any/c)]
           [timeline-pict (->i ([indexed-fevents (listof indexed-future-event?)]) 
                               (#:x [x (or/c #f exact-nonnegative-integer?)] 
