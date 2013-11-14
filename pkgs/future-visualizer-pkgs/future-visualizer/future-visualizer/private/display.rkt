@@ -1,4 +1,6 @@
 #lang racket/base 
+(require (only-in racket/class make-object)
+         (only-in racket/draw color%))
 (provide get-event-color 
          get-event-forecolor
          get-event-opacity
@@ -86,7 +88,7 @@
   (case type 
     [(create) "blue"] 
     [(start-work start-0-work touch-resume) "green"] 
-    [(block touch) "red"] 
+    [(block touch) (make-object color% 176 43 44)] 
     [(sync) "orange"] 
     [(touch-pause) "blue"] 
     [(result abort suspend) "white"] 

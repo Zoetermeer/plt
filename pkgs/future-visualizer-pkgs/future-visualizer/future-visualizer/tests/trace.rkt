@@ -4,7 +4,7 @@
          future-visualizer/private/visualizer-data 
          (for-syntax racket/base 
                      future-visualizer/private/visualizer-data)
-         (only-in future-visualizer/trace trace-futures)
+         (only-in future-visualizer/trace parallel-profile)
          "vtrace3.rkt") 
 
 #|
@@ -54,7 +54,7 @@ Invariants:
 (cond 
   [(futures-enabled?)
    (define log1 (parameterize ([current-output-port (open-output-string)])
-                  (trace-futures 
+                  (parallel-profile 
                    (let ([fs (for/list ([i (in-range 0 1000)]) 
                                (future (λ () 
                                          (printf "hello\n"))))]) 
@@ -75,7 +75,7 @@ Invariants:
    ;(events logged on runtime thread outside scope of any future)
    (check-equal? (length (hash-keys (trace-future-timelines tr1))) 1001)
    
-   (define log3 (trace-futures 
+   (define log3 (parallel-profile 
                  (parameterize ([current-command-line-arguments #("2000")]
                                 [current-output-port (open-output-string)])
                    (void (dynamic-require 'tests/racket/benchmarks/shootout/mandelbrot-futures #f))))) 
@@ -85,7 +85,7 @@ Invariants:
    (check-equal? (length (hash-keys (trace-future-timelines tr3))) 2001)
    
    
-   (define log4 (trace-futures 
+   (define log4 (parallel-profile 
                  (let ([f (future (λ () 
                                     (for/list ([i (in-range 0 10000)]) 
                                       (cons i (+ i 1)))))]) 
@@ -118,7 +118,7 @@ Invariants:
    (let ([tr (build-trace vtrace-3)]) 
      (check-future-timeline-ordering tr))]
   [else 
-   (define l (trace-futures (let ([f (future (λ () (printf "hello\n")))]) 
+   (define l (parallel-profile (let ([f (future (λ () (printf "hello\n")))]) 
                               (sleep 0.1) 
                               (touch f)))) 
    (check-equal? l '())])

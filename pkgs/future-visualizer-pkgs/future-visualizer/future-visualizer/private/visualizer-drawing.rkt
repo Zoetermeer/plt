@@ -26,6 +26,7 @@
          draw-creategraph-pict
          zoom-level->factor
          graph-overlay-pict
+         program-summary-pict
          (struct-out segment)
          (struct-out frame-info)
          (struct-out timeline-tick)
@@ -677,6 +678,99 @@
                     (loop next-targ-arr next in-rtcall-scope)
                     next-targ-arr)))))))
 
+(define (summary-header str width)
+  (define t (colorize (text str) "white"))
+  (lc-superimpose 
+    (cellophane (colorize (filled-rectangle width (+ (pict-height t) 20)) "white") 0.3)
+    t))
+
+(define (event-detail-text str #:padding [padding 0])
+  (define t (colorize (text str) "white"))
+  (if (zero? padding)
+    t
+    (cc-superimpose (blank (+ (pict-width t) (* 2 padding))
+                           (+ (pict-height t) (* 2 padding)))
+                    t)))
+
+(define (block-summary-pict tr vregion)
+  (define margin 10)
+  (define w (- (viewable-region-width vregion) (* 2 margin)))
+  (define bps (for/list ([prim (in-list (sort (hash-keys (trace-block-counts tr)) 
+                                        > 
+                                        #:key (λ (x) (hash-ref (trace-block-counts tr) x))))])
+                (define t (event-detail-text (format "~a" prim)))
+                (define r (rect-pict (get-event-color 'block) "white" w (+ (pict-height t) 10)))
+                (hc-append (lc-superimpose r t)
+                           (event-detail-text (number->string (hash-ref (trace-block-counts tr) prim)) #:padding 3))))
+  (define bps-stacked (apply vl-append margin bps))
+  (cc-superimpose 
+    (blank (viewable-region-width vregion) 
+           (+ (pict-height bps-stacked) (* 2 margin))) 
+      bps-stacked))
+
+;;program-summary-pict : trace -> pict
+(define (program-summary-pict tr vregion)
+  (define w (viewable-region-width vregion))
+  (define summ (apply vl-append 
+                `(,(summary-header "Program" w)
+                  ,(event-detail-text (format "Real time: ~a" (get-time-string (trace-real-time tr))) #:padding 5)
+                  ,(event-detail-text (format "Futures: ~a" (trace-num-futures tr)) #:padding 5)
+                  ,(summary-header (format "Barricades (~a)" (trace-num-blocks tr)) w)
+                  ,(block-summary-pict tr vregion)
+                  ,(summary-header (format "Syncs (~a)" (trace-num-syncs tr)) w)
+                  ,(summary-header (format "GC's (~a)" (trace-num-gcs tr)) w))))
+  (define bg 
+    (colorize 
+      (filled-rectangle w
+                        (max (pict-height summ)
+                             (viewable-region-height vregion)))
+      (make-object color% 53 106 160)))
+  (lt-superimpose bg summ))
+
+;;event-detail-pict : segment trace -> pict
+(define (event-detail-pict seg tr)
+  (define evt (segment-event seg))
+  (define txt 
+    `(,(event-detail-text (format "Event: ~a" (event-type evt)))
+      ,(event-detail-text (format "Time: +~a" (get-time-string (- (event-start-time evt)
+                                                                  (trace-start-time tr)))))
+      ,(event-detail-text (format "Future ID: ~a" (if (not (event-future-id evt))
+                                                      "None (top-level event)"
+                                                      (event-future-id evt))))
+      ,(event-detail-text (format "Process ID: ~a" 
+                            (let ([id (event-proc-id evt)])
+                              (if (equal? id 'gc)
+                                  RT-THREAD-ID
+                                  id))))
+      ,@(case (event-type evt) 
+          [(start-work start-0-work gc) 
+           `(,(event-detail-text (format "Duration: ~a" (get-time-string (- (event-end-time evt) 
+                                                                                  (event-start-time evt))))))] 
+          [(block sync) 
+           `(,(if (event-prim-name evt) 
+                (event-detail-text (format "Primitive: ~a" (symbol->string (event-prim-name evt))))
+                (event-detail-text "Primitive: ??"))
+             ,(let ([label2-txt 
+                       (cond 
+                         ;If the log was unexpectedly truncated, some worker blocks/syncs may not have been linked 
+                         ;with their runtime counterparts -- check to make sure prim-name is present
+                         [(event-prim-name evt)
+                          (cond  
+                            [(touch-event? evt) (format "Touching future ~a" (event-user-data evt))]
+                            [(allocation-event? evt) (format "Size: ~a" (event-user-data evt))] 
+                            [(jitcompile-event? evt) (format "Jitting: ~a" (event-user-data evt))] 
+                            [else ""])] 
+                         [else ""])])
+                (event-detail-text label2-txt)))] 
+          [(create) 
+           `(,(event-detail-text (format "Creating future ~a" (event-user-data evt))))] 
+          [(touch) 
+           `(,(event-detail-text (format "Touching future ~a" (event-user-data evt))))]
+          [else '()])))
+  (define tp (apply vl-append txt))
+  (define box (cellophane (colorize (filled-rectangle (+ (pict-width tp) 20) (+ (pict-height tp) 20)) "black") 0.5))
+  (cc-superimpose box tp))
+
 ;Draws the pict that is layered on top of the exec. timeline canvas
 ;to highlight a specific future's event sequence
 ;;timeline-overlay : uint uint (or segment #f) (or segment #f) frame-info trace -> pict
@@ -693,7 +787,8 @@
      (define aseg-rel-x (- (segment-x picked-seg) (viewable-region-x vregion)))
      (define aseg-rel-y (- (segment-y picked-seg) (viewable-region-y vregion)))
      (define emphasized (make-stand-out-pict picked-seg))
-     (case (event-type (segment-event picked-seg))
+     (define arrow-stuff
+      (case (event-type (segment-event picked-seg))
        [(gc)
         (pin-over bg aseg-rel-x aseg-rel-y emphasized)]
        [else
@@ -725,7 +820,13 @@
                                                 hmag))
                                     magnified)]
                [arrows (draw-arrows hover-magnified vregion picked-seg)])
-          arrows)])]
+          arrows)]))
+      (define details (event-detail-pict hovered tr))
+      (pin-line (rb-superimpose arrow-stuff details)
+                (segment-p picked-seg)
+                cc-find 
+                details 
+                lt-find)]
     [else base]))
 
 ;Draw a line from one node on the creation graph to another
