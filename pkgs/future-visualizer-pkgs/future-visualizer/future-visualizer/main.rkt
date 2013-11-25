@@ -11,7 +11,7 @@
          (contract-out 
           #;[show-visualizer (->* () (#:timeline (listof indexed-future-event?)) void?)]
           [show-profiler (list? . -> . void?)]
-          #;[visualize-futures-thunk ((-> any/c) . -> . any/c)]
+          [visualize-futures-thunk ((-> any/c) . -> . any/c)]
           [timeline-pict (->i ([indexed-fevents (listof indexed-future-event?)]) 
                               (#:x [x (or/c #f exact-nonnegative-integer?)] 
                                #:y [y (or/c #f exact-nonnegative-integer?)] 
@@ -40,20 +40,12 @@
 (define-syntax-rule (visualize-futures e ...)
   (show-profiler (parallel-profile e ...)))
 
-#;(define-syntax-rule (visualize-futures e ...)
-  (begin (start-future-tracing!)
-         (begin0 (begin e ...)
-           (stop-future-tracing!)
-           (show-visualizer))))
-
-#;(define-syntax (visualize-futures stx)
-  (syntax-case stx ()
-    [(_ e ...)
-      #'(visualize-futures-thunk 
-          (lambda () 
-            e ...))]))
-
-
 ;;visualize-futures-thunk : (-> any/c) -> any/c
-(define (visualize-futures-thunk thunk) 
+(define (visualize-futures-thunk thunk)
   (show-profiler (parallel-profile (thunk))))
+
+
+
+
+
+
